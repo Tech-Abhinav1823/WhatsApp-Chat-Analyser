@@ -4,38 +4,43 @@ import plotly.express as px
 from wordcloud import WordCloud
 from collections import Counter
 import emoji
+import streamlit as st
 
 extract = URLExtract()
+
+# Cache stopwords loading
+@st.cache_data
+def _load_stopwords():
+    with open('stop_hinglish.txt', 'r', encoding='utf-8') as f:
+        return set(f.read().split())
 
 
 # ---------------------- USER STATS ----------------------
 def user_stats(selected_user, df):
     if selected_user != 'Overall':
-        df = df[df['user'] == selected_user]
+        df = df[df['user'] == selected_user].copy()
 
     num_messages = df.shape[0]
 
-    # total words
-    words = []
-    for msg in df['message']:
-        words.extend(msg.split())
+    # total words - vectorized
+    words = df['message'].str.split().explode()
+    num_words = words.shape[0]
 
-    # total media
-    num_media_messages = df[df['message'] == '<Media omitted>\n'].shape[0]
+    # total media - vectorized
+    num_media_messages = (df['message'] == '<Media omitted>\n').sum()
 
-    # total links
+    # total links - optimized
     extractor = URLExtract()
-    links = []
-    for msg in df['message']:
-        links.extend(extractor.find_urls(msg))
+    all_messages = ' '.join(df['message'].astype(str))
+    links = extractor.find_urls(all_messages)
 
-    return num_messages, len(words), num_media_messages, len(links)
+    return num_messages, num_words, num_media_messages, len(links)
 
 
 # ---------------------- MOST BUSY USERS CHART ----------------------
 def most_busy_person(df):
 
-    s = df[df['user'] != "Group Notification"]['user'].value_counts().head()
+    s = df[df['user'] != "group_notification"]['user'].value_counts().head()
 
     data = pd.DataFrame({"user": s.index, "count": s.values})
 
@@ -55,32 +60,26 @@ def most_busy_person(df):
     return fig,df
 
 def wordcloud(selected_user, df):
-    
-    # Hinglish stopwords file load
-    with open('stop_hinglish.txt', 'r') as f:
-        stop_words = set(f.read().split())
+    # Load stopwords from cache
+    stop_words = _load_stopwords()
 
     # Specific user filter
     if selected_user != 'Overall':
-        df = df[df['user'] == selected_user]
+        df = df[df['user'] == selected_user].copy()
 
     # Remove group notifications + media msgs
-    temp = df[df['user'] != 'group_notification']
-    temp = temp[temp['message'] != '<Media omitted>\n']
+    temp = df[(df['user'] != 'group_notification') & (df['message'] != '<Media omitted>\n')].copy()
 
-    # Remove stopwords function
-    def remove_stop_words(message):
-        y = []
-        for word in message.lower().split():
-            if word not in stop_words:
-                y.append(word)
-        return " ".join(y)
+    # Remove stopwords - optimized vectorized approach
+    def remove_stop_words_vectorized(messages):
+        words_list = messages.str.lower().str.split()
+        filtered = words_list.apply(lambda words: [w for w in words if w not in stop_words])
+        return filtered.str.join(' ')
 
-    # Apply stopword cleaning
-    temp['message'] = temp['message'].apply(remove_stop_words)
+    temp['message'] = remove_stop_words_vectorized(temp['message'])
+    
     # WordCloud
     wc = WordCloud(
-        
         width=500,
         height=400,
         min_font_size=10,
@@ -92,32 +91,27 @@ def wordcloud(selected_user, df):
 
 
 def most_common_words(selected_user, df):
-
-    # read stopwords
-    with open("stop_hinglish.txt", "r", encoding="utf-8") as f:
-        stop_words = set(f.read().split())
+    # Load stopwords from cache
+    stop_words = _load_stopwords()
 
     # filter chats if needed
     if selected_user != "Overall":
-        df = df[df['user'] == selected_user]
+        df = df[df['user'] == selected_user].copy()
 
     # remove group notifications + media messages
-    temp = df[df['user'] != "group_notification"]
-    temp = temp[temp['message'] != "<Media omitted>\n"]
+    temp = df[(df['user'] != "group_notification") & (df['message'] != "<Media omitted>\n")].copy()
 
-    words = []
-
-    # extract clean words
-    for message in temp['message']:
-        for word in message.lower().split():
-            if word not in stop_words:
-                words.append(word)
+    # extract clean words - vectorized approach
+    words_series = temp['message'].str.lower().str.split().explode()
+    words_series = words_series[~words_series.isin(stop_words)]
+    words_series = words_series[words_series.str.len() > 0]  # Remove empty strings
 
     # top 20 most common
-    most_common_df = pd.DataFrame(
-        Counter(words).most_common(20),
-        columns=["word", "count"]
-    )
+    word_counts = words_series.value_counts().head(20)
+    most_common_df = pd.DataFrame({
+        "word": word_counts.index,
+        "count": word_counts.values
+    })
 
     # Plotly Express bar chart
     fig = px.bar(
@@ -140,31 +134,30 @@ def most_common_words(selected_user, df):
 
 def emoji_helper(selected_user, df):
     if selected_user != 'Overall':
-        df = df[df['user'] == selected_user]
+        df = df[df['user'] == selected_user].copy()
 
-    emojis = []
-    for message in df['message']:
-        emojis.extend([c for c in message if c in emoji.EMOJI_DATA])
+    # Vectorized emoji extraction
+    emojis = df['message'].apply(
+        lambda msg: [c for c in str(msg) if c in emoji.EMOJI_DATA]
+    ).explode().dropna()
 
     # Convert to DataFrame
-    emoji_df = pd.DataFrame(Counter(emojis).most_common())
-
-    # Rename columns for plotly
-    emoji_df = emoji_df.rename(columns={0: 'emoji', 1: 'count'})
+    emoji_counts = emojis.value_counts()
+    emoji_df = pd.DataFrame({
+        'emoji': emoji_counts.index,
+        'count': emoji_counts.values
+    })
 
     return emoji_df
 
 def monthly_timeline(selected_user,df):
     if selected_user != 'Overall':
-        df = df[df['user'] == selected_user]
+        df = df[df['user'] == selected_user].copy()
 
-    timeline = df.groupby(['year', 'month_num', 'month']).count()['message'].reset_index()
+    timeline = df.groupby(['year', 'month_num', 'month']).size().reset_index(name='message')
 
-    time = []
-    for i in range(timeline.shape[0]):
-        time.append(timeline['month'][i] + "-" + str(timeline['year'][i]))
-
-    timeline['time'] = time
+    # Vectorized string concatenation
+    timeline['time'] = timeline['month'] + "-" + timeline['year'].astype(str)
 
     return timeline
 
@@ -195,12 +188,43 @@ def month_activity_map(selected_user,df):
 
 def active_hours(selected_user, df):
     if selected_user != "Overall":
-        df = df[df["user"] == selected_user]
+        df = df[df["user"] == selected_user].copy()
+    else:
+        df = df.copy()
 
-    df['hour'] = df['date'].dt.hour
+    # Ensure hour column exists (should already be there from preprocessing)
+    if 'hour' not in df.columns:
+        df['hour'] = df['date'].dt.hour
+    
     active = df['hour'].value_counts().sort_index()
 
     return active
+def longest_paragraph_by_user(df):
+    """Find the longest paragraph/message for each user."""
+    # Filter out group notifications and media messages
+    filtered_df = df[
+        (df['user'] != 'group_notification') & 
+        (df['message'] != '<Media omitted>\n')
+    ].copy()
+    
+    if filtered_df.empty:
+        return pd.DataFrame(columns=['user', 'longest_message', 'char_count', 'word_count', 'date'])
+    
+    # Calculate message lengths
+    filtered_df['char_count'] = filtered_df['message'].str.len()
+    filtered_df['word_count'] = filtered_df['message'].str.split().str.len()
+    
+    # Find longest message for each user (by character count)
+    longest_messages = filtered_df.loc[
+        filtered_df.groupby('user')['char_count'].idxmax()
+    ][['user', 'message', 'char_count', 'word_count', 'date']].copy()
+    
+    longest_messages = longest_messages.rename(columns={'message': 'longest_message'})
+    longest_messages = longest_messages.sort_values('char_count', ascending=False)
+    
+    return longest_messages
+
+
 
 def chat_streak(selected_user, df):
     if selected_user != "Overall":
