@@ -9,14 +9,18 @@ if uploaded_file is not None:
     bytes_data = uploaded_file.getvalue()
     data = bytes_data.decode('utf-8', errors='replace')
     df = preprocessor.preprocess(data)
-
-    # fetch unique users
+# fetch unique users
     user_list = df['user'].unique().tolist()
-    user_list.remove('group_notification')
-    user_list.sort()
-    user_list.insert(0,'Overall')
 
-    selected_user = st.sidebar.selectbox('Show Analysis wrt',user_list)
+    # safely remove group_notification if present
+    if 'group_notification' in user_list:
+        user_list.remove('group_notification')
+
+    user_list.sort()
+    user_list.insert(0, 'Overall')
+
+    selected_user = st.sidebar.selectbox('Show Analysis wrt', user_list)
+
 
     if st.sidebar.button('Show Analysis'):
         num_messages, words, num_media_messages, num_links = backhand.user_stats(selected_user, df)
